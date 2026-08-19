@@ -107,12 +107,6 @@ def delete_assessment(record_id):
         connection.execute("DELETE FROM assessments WHERE id = ?", (record_id,))
 
 
-def count():
-    init_store()
-    with _connect() as connection:
-        return connection.execute("SELECT COUNT(*) FROM assessments").fetchone()[0]
-
-
 def store_location():
     """Where the database lives, and how big it is, for the UI to show."""
     if not os.path.exists(DB_PATH):

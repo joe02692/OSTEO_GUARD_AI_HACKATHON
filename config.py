@@ -13,9 +13,6 @@ import os
 
 from dotenv import load_dotenv
 
-APP_NAME = "OsteoGuard AI"
-APP_TAGLINE = "Evidence-grounded osteoarthritis decision support"
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # A .env beside the application wins; a .env in the working directory is also

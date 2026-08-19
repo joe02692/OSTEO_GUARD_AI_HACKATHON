@@ -7,7 +7,7 @@ Two working tools, both driven by the same guideline-grounded LLM backend:
     2. Report Summary    - upload or paste a medical report, get a structured
        summary plus the guideline evidence relevant to it.
 
-Run with:  python -m streamlit run app_dashboard.py
+Run with:  python -m streamlit run app.py
 """
 
 import json
@@ -30,9 +30,14 @@ THEME_PATH = os.path.join(os.path.dirname(__file__), "theme.css")
 
 
 @st.cache_data
-def load_theme(_mtime):
-    """Read theme.css. Keyed on the file's mtime so editing the stylesheet
-    shows up on the next rerun instead of serving a stale cached copy."""
+def load_theme(mtime):
+    """Read theme.css, keyed on the file's mtime so editing the stylesheet
+    shows up on the next rerun instead of serving a stale cached copy.
+
+    The parameter must NOT start with an underscore: st.cache_data excludes
+    underscore-prefixed arguments from the cache key, which would cache the
+    first read forever.
+    """
     with open(THEME_PATH, encoding="utf-8") as handle:
         return handle.read()
 
@@ -56,6 +61,26 @@ def card(title=None, icon=""):
                 unsafe_allow_html=True,
             )
         yield box
+
+
+def is_rtl(text):
+    """True when a block of text is predominantly right-to-left.
+
+    Counts Arabic letters against Latin ones rather than looking only at the
+    first character, so a summary that opens with a Latin drug name still reads
+    as Arabic.
+    """
+    text = text or ""
+    arabic = sum(1 for ch in text if "؀" <= ch <= "ۿ")
+    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    return arabic > 20 and arabic > latin * 0.3
+
+
+def render_markdown(text):
+    """Render markdown, flipping the whole block to RTL when it is Arabic."""
+    if is_rtl(text):
+        st.markdown("<span class='rtl-mark'></span>", unsafe_allow_html=True)
+    st.markdown(text)
 
 
 def row(key, value_html):
@@ -327,7 +352,7 @@ if page == "Clinical Assistant":
 
         if st.session_state.answer:
             with card("Answer", "\U0001F4AC"):
-                st.markdown(st.session_state.answer)
+                render_markdown(st.session_state.answer)
             if st.session_state.sources:
                 with card("Retrieved evidence", "\U0001F4DA"):
                     render_evidence(st.session_state.sources)
@@ -414,6 +439,16 @@ elif page == "Report Summary":
                          placeholder="Paste consultation notes, radiology reports, "
                                      "discharge summaries...")
 
+            language_choice = st.radio(
+                "Summary language",
+                ["Match the report", "English", "العربية"],
+                horizontal=True,
+                help="The summary is written in this language whatever language "
+                     "the report itself uses. Drug names, doses and figures are "
+                     "always kept exactly as the report writes them.")
+            summary_language = {"Match the report": "auto", "English": "english",
+                                "العربية": "arabic"}[language_choice]
+
             with_evidence = st.checkbox("Also retrieve matching guideline evidence",
                                         value=True)
             action, reset = st.columns([2, 1])
@@ -432,7 +467,8 @@ elif page == "Report Summary":
                 try:
                     from backend import summarize_report, _chat as backend_chat
                     summary, summary_sources = summarize_report(
-                        report_text, with_evidence=with_evidence)
+                        report_text, with_evidence=with_evidence,
+                        language=summary_language)
                     st.session_state.summary = summary
                     st.session_state.summary_sources = summary_sources
                     st.session_state.saved_id = None
@@ -462,7 +498,7 @@ elif page == "Report Summary":
     with top_right:
         with card("2. Structured summary", "\U0001F9FE"):
             if st.session_state.summary:
-                st.markdown(st.session_state.summary)
+                render_markdown(st.session_state.summary)
                 st.markdown(
                     "<div class='note-amber'>The summary is restricted to what the "
                     "report itself says. Anything missing is marked as not stated "
@@ -600,7 +636,7 @@ Verify against the current published guideline before acting.
                             st.error(f"Error: {exc}")
 
             if st.session_state.recommendations:
-                st.markdown(st.session_state.recommendations)
+                render_markdown(st.session_state.recommendations)
                 render_evidence(st.session_state.recommendation_sources)
                 videos = resources.exercise_videos(
                     st.session_state.recommendations, knee)

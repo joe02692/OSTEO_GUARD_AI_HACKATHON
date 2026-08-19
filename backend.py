@@ -1,7 +1,8 @@
 """OsteoGuard AI - retrieval backend.
 
 Hybrid retrieval (BM25 + PubMedBERT embeddings) fused with RRF and reranked by
-a biomedical cross-encoder, then answered by Gemini over the retrieved context.
+a biomedical cross-encoder, then answered by the configured LLM over the
+retrieved context.
 
 Also serves `summarize_report`, which condenses a free-text clinical report
 and pulls the guideline evidence relevant to it.
@@ -26,16 +27,13 @@ from sentence_transformers import CrossEncoder
 import config
 
 # The notebook writes the populated database here.
-DB_PATH = os.path.join(os.path.dirname(__file__), "osteoguard_ai", "Code", "osteoarthritis_db")
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "osteoarthritis_db")
 COLLECTION_NAME = "osteoarthritis_guidelines_v2"
 
 # Biomedical reranker (trained on PubMed query/article pairs). Replaces the
 # generic web-search reranker, which was the single biggest source of error.
 RERANKER_MODEL = "ncbi/MedCPT-Cross-Encoder"
 EMBEDDING_MODEL = "NeuML/pubmedbert-base-embeddings"
-
-# Generation model id, from configuration rather than the interface.
-LLM_MODEL = config.model_name()
 
 # --- Retrieval presets ------------------------------------------------------
 # Calibration constants (A, B) are fitted per preset so the reported confidence
@@ -258,9 +256,18 @@ def looks_degenerate(text):
     return bool(_FILLER_RUN.search(text or ""))
 
 
+# gpt-oss also splits acronyms with a narrow space -- "NSA<nnbsp>ID" -- which
+# a naive space conversion turns into "NSA ID". Inside a run of capitals the
+# separator is always an artifact, so it is deleted rather than widened. The
+# rule requires capitals on both sides, leaving "5<nnbsp>mg" as "5 mg".
+_ACRONYM_SPLIT = re.compile("(?<=[A-Z])[   ](?=[A-Z])")
+
+
 def _clean_output(text):
     """Remove invisible filler and normalise exotic spaces to plain ones."""
-    text = (text or "").translate(_DROP).translate(_TO_SPACE)
+    text = (text or "").translate(_DROP)
+    text = _ACRONYM_SPLIT.sub("", text)
+    text = text.translate(_TO_SPACE)
     return re.sub(r"[ 	]{3,}", " ", text)
 
 
@@ -360,6 +367,47 @@ User Question: {query}
 
 # --- Report summarisation ---------------------------------------------------
 
+ENGLISH_HEADINGS = """### Patient snapshot
+### Reason for the report
+### Key findings
+### Diagnoses stated in the report
+### Current management
+### Abnormal or urgent findings
+### Follow-up and next steps"""
+
+ARABIC_HEADINGS = """### لمحة عن المريض
+### سبب التقرير
+### أهم النتائج
+### التشخيصات المذكورة في التقرير
+### العلاج الحالي
+### نتائج غير طبيعية أو عاجلة
+### المتابعة والخطوات التالية"""
+
+# The summary language is the clinician's choice, independent of the language
+# the report happens to be written in.
+SUMMARY_LANGUAGES = {
+    "auto": {
+        "headings": ENGLISH_HEADINGS,
+        "not_stated": "Not stated in the report.",
+        "rule": ("- Write in the same language the report is written in, and "
+                 "translate the headings into that language."),
+    },
+    "english": {
+        "headings": ENGLISH_HEADINGS,
+        "not_stated": "Not stated in the report.",
+        "rule": ("- Write the summary in English, whatever language the report "
+                 "is written in."),
+    },
+    "arabic": {
+        "headings": ARABIC_HEADINGS,
+        "not_stated": "غير مذكور في التقرير.",
+        "rule": ("- Write the summary in Arabic, whatever language the report is "
+                 "written in. Keep drug names, dosages, measurements, dates and "
+                 "identifiers exactly as they appear in the report, in their "
+                 "original script -- never transliterate or convert them."),
+    },
+}
+
 SUMMARY_PROMPT = """You are a clinical documentation assistant. Summarise the
 medical report below for a busy clinician.
 
@@ -367,21 +415,15 @@ Rules you must follow:
 - Use ONLY information that is present in the report. Never infer, estimate,
   extrapolate or invent anything.
 - If the report does not contain something a heading asks for, write exactly:
-  *Not stated in the report.*
+  *{not_stated}*
 - Reproduce all numbers, doses, dates and units exactly as written.
 - Do not add a diagnosis, grade or measurement the report does not state.
 - Do not give treatment advice here; only report what the document says.
-- Write in the same language the report is written in.
+{rule}
 
-Return markdown using exactly these headings:
+Return markdown using exactly these headings, in this order:
 
-### Patient snapshot
-### Reason for the report
-### Key findings
-### Diagnoses stated in the report
-### Current management
-### Abnormal or urgent findings
-### Follow-up and next steps
+{headings}
 
 Keep each section to short bullet points.
 
@@ -395,7 +437,8 @@ that should be looked up in a treatment guideline.
 
 Give the affected joint, the diagnosis, and the treatments that are mentioned
 or that the findings raise. Clinical terms only, separated by spaces, 15 words
-maximum.
+maximum. Always answer in ENGLISH, translating if the report is in another
+language -- the guideline index being searched is English.
 
 Do NOT use the words "guideline", "recommendation", "management", "patient" or
 "report" -- those words match title pages rather than clinical text. Output the
@@ -411,7 +454,8 @@ TRUNCATION_NOTE = """
 {limit:,} characters were summarised.*"""
 
 
-def summarize_report(report_text, api_key=None, with_evidence=True, top_n=4, mode=None):
+def summarize_report(report_text, api_key=None, with_evidence=True, top_n=4,
+                     mode=None, language="auto"):
     """Summarise a free-text medical report.
 
     The summary is constrained to the content of the report itself. When
@@ -429,7 +473,11 @@ def summarize_report(report_text, api_key=None, with_evidence=True, top_n=4, mod
     text = text[:REPORT_CHAR_LIMIT]
 
     try:
-        summary = _chat(SUMMARY_PROMPT.format(report=text), api_key, job="summary")
+        preset = SUMMARY_LANGUAGES.get(language, SUMMARY_LANGUAGES["auto"])
+        prompt = SUMMARY_PROMPT.format(report=text, rule=preset["rule"],
+                                       headings=preset["headings"],
+                                       not_stated=preset["not_stated"])
+        summary = _chat(prompt, api_key, job="summary")
     except NotConfigured as exc:
         return str(exc), []
     except Exception as exc:

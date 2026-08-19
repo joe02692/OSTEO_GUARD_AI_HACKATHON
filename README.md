@@ -1,7 +1,15 @@
-# OsteoGuard AI
+# 🩺 OsteoGuard AI
+
+**Built for the AI Hackathon by Orange Digital Center, Creativa, and ITIDA**
 
 Clinical decision support for osteoarthritis management, grounded in NICE NG226
 and the ACR/AF 2019 osteoarthritis guideline.
+
+## 👥 Team: The Innovators
+
+* **Youssef** — AI / Software Engineering
+* **[Teammate 2 Name]** — [Role/Specialty]
+* **[Teammate 3 Name]** — [Role/Specialty]
 
 ## Setup
 
@@ -36,11 +44,11 @@ and the ACR/AF 2019 osteoarthritis guideline.
 3. **Run the application**
 
    ```bash
-   python -m streamlit run app_dashboard.py
+   python -m streamlit run app.py
    ```
 
-   Run it from inside `AI_Hackathon_OsteoGuard-AI-main/` so that `.env` and
-   `.streamlit/config.toml` (which pins the light clinical theme) are picked up.
+   Run it from the repository root so that `.env` and `.streamlit/config.toml`
+   (which pins the light clinical theme) are picked up.
 
 ## What it does
 
@@ -76,7 +84,7 @@ vector store.
 
 ## Architecture
 
-- **Frontend**: Streamlit (`app_dashboard.py`, styled by `theme.css`)
+- **Frontend**: Streamlit (`app.py`, styled by `theme.css`)
 - **Retrieval**: BM25 keyword search with clinical abbreviation expansion, run
   alongside `NeuML/pubmedbert-base-embeddings` dense search in ChromaDB, fused
   with reciprocal rank fusion and reranked by `ncbi/MedCPT-Cross-Encoder`
@@ -105,19 +113,27 @@ Retrieval presets trade latency against precision:
 
 ## Files
 
-| File | Role |
-|---|---|
-| `app_dashboard.py` | The application |
-| `config.py` | Credentials and engine settings, read from the environment |
-| `theme.css` | Clinical green / blue / white theme |
-| `backend.py` | Retrieval, answering, report summarisation |
-| `reports.py` | PDF and text extraction from uploaded reports |
-| `risk.py` | Rule-based OA risk factor display |
-| `safety.py` | Red-flag screening with quote verification |
-| `records.py` | Local SQLite patient record store |
-| `resources.py` | Exercise video search links |
-| `app.py` | Earlier single-page Q&A UI, kept for reference |
-| `osteoguard_ai/Code/Rag_model.ipynb` | Corpus build and evaluation notebook |
+```
+app.py                    the application
+theme.css                 clinical green / blue / white theme
+config.py                 credentials and engine settings, from the environment
+backend.py                retrieval, answering, report summarisation
+reports.py                PDF / text extraction, with OCR for scans
+safety.py                 red-flag screening with quote verification
+records.py                local SQLite patient record store
+resources.py              exercise video search links
+risk.py                   rule-based OA risk factor display
+data/
+  osteoarthritis_db/      Chroma index the app reads (238 passages)
+  guidelines/             the two source PDFs
+notebooks/
+  Rag_model.ipynb         corpus build and evaluation
+docs/                     hackathon briefing material
+```
+
+The notebook builds `data/osteoarthritis_db`; the application reads it. The
+retrieval logic in `backend.py` is a port of the notebook's Cell 8, so a change
+to one needs mirroring in the other.
 
 ## Limits
 

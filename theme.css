@@ -1,5 +1,5 @@
 /* OsteoGuard AI theme — clinical green / blue / white, light only.
-   Loaded by app_dashboard.py. Animations are deliberately small and short,
+   Loaded by app.py. Animations are deliberately small and short,
    and are switched off entirely for prefers-reduced-motion users. */
 
 :root{
@@ -38,7 +38,7 @@ a{color:var(--blue-700)}
 
 /* ---------------- cards ----------------
    A card is any bordered container whose first element is a .card-h heading,
-   which is exactly what the card() helper in app_dashboard.py emits. Targeting
+   which is exactly what the card() helper in app.py emits. Targeting
    the heading rather than a Streamlit internal class keeps this stable across
    Streamlit versions; without :has() support the container simply falls back
    to Streamlit's own plain border. */
@@ -143,6 +143,31 @@ section[data-testid="stSidebar"] .stButton>button[kind="primary"]{
   box-shadow:0 12px 26px rgba(5,150,105,.28);
 }
 .stDownloadButton>button{border-radius:11px;font-weight:600;transition:all .2s ease}
+
+/* ---------------- bidirectional text ----------------
+   `unicode-bidi: plaintext` sets each paragraph's direction from its own first
+   strong character, exactly as dir="auto" would. Arabic therefore starts at the
+   right and English is untouched, with no language detection in Python and no
+   per-widget markup that a Streamlit rerun could drop. */
+.stTextArea textarea, .stTextInput input{
+  unicode-bidi:plaintext; text-align:start;
+}
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] h2,
+[data-testid="stMarkdownContainer"] h3,
+[data-testid="stMarkdownContainer"] h4,
+[data-testid="stMarkdownContainer"] blockquote{
+  unicode-bidi:plaintext; text-align:start;
+}
+/* Whole blocks of Arabic - a summary or an answer - are flipped outright, so
+   list bullets and headings sit on the right as well. The application emits an
+   .rtl-mark marker immediately before such a block; CSS cannot detect the
+   script itself. */
+[data-testid="stElementContainer"]:has(.rtl-mark)
+  + [data-testid="stElementContainer"]{direction:rtl; text-align:right}
+.rtl-mark{display:none}
 
 /* ---------------- inputs ---------------- */
 .stTextArea textarea, .stTextInput input, .stNumberInput input{

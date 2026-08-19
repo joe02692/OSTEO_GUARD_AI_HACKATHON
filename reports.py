@@ -15,11 +15,6 @@ typically contains a single word -- its own watermark -- which is enough to
 look like a successful extraction while carrying no clinical content.
 """
 
-SUPPORTED_TYPES = ["pdf", "txt", "md", "text"]
-
-# Reports longer than this are trimmed before being sent to the model.
-CHAR_LIMIT = 60000
-
 # Below this many characters per page a PDF is treated as a scan rather than a
 # document with a text layer. A real page of clinical text runs to hundreds.
 SCAN_CHARS_PER_PAGE = 100
@@ -149,9 +144,3 @@ def extract_text(filename, data):
     if total > read:
         note += f" Only the first {read} of {total} pages were processed."
     return text, note, True
-
-
-def preview(text, limit=600):
-    """Short preview of the extracted text for the UI."""
-    text = " ".join((text or "").split())
-    return text if len(text) <= limit else text[:limit].rstrip() + " ..."
