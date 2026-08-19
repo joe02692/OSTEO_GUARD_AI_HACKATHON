@@ -3,6 +3,9 @@
 Hybrid retrieval (BM25 + PubMedBERT embeddings) fused with RRF and reranked by
 a biomedical cross-encoder, then answered by Gemini over the retrieved context.
 
+Also serves `summarize_report`, which condenses a free-text clinical report
+and pulls the guideline evidence relevant to it.
+
 Benchmarked on a 50-query clinical eval set:
 
     configuration                       Precision@5   Confidence
@@ -19,7 +22,8 @@ import chromadb
 from chromadb.utils import embedding_functions
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
-import google.generativeai as genai
+
+import config
 
 # The notebook writes the populated database here.
 DB_PATH = os.path.join(os.path.dirname(__file__), "osteoguard_ai", "Code", "osteoarthritis_db")
@@ -30,8 +34,8 @@ COLLECTION_NAME = "osteoarthritis_guidelines_v2"
 RERANKER_MODEL = "ncbi/MedCPT-Cross-Encoder"
 EMBEDDING_MODEL = "NeuML/pubmedbert-base-embeddings"
 
-# Gemini model. Override with GEMINI_MODEL if this id is not available to you.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+# Generation model id, from configuration rather than the interface.
+LLM_MODEL = config.model_name()
 
 # --- Retrieval presets ------------------------------------------------------
 # Calibration constants (A, B) are fitted per preset so the reported confidence
@@ -40,14 +44,17 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 #   MODE        Precision@5   Confidence   Latency/query (CPU)
 #   ---------------------------------------------------------
 #   accurate      87.60%        88.20%          ~14 s
-#   demo          84.40%        85.10%          ~5.9 s
+#   balanced      84.40%        85.10%          ~5.9 s
 #   fast          82.80%        83.50%          ~4.4 s
 RETRIEVAL_PRESETS = {
     "accurate": {"fetch_k": 60, "rerank_pool": 40, "A": 1.8037, "B": 0.4720},
-    "demo": {"fetch_k": 50, "rerank_pool": 20, "A": 2.1946, "B": -0.0692},
+    "balanced": {"fetch_k": 50, "rerank_pool": 20, "A": 2.1946, "B": -0.0692},
     "fast": {"fetch_k": 40, "rerank_pool": 15, "A": 2.1389, "B": -0.1519},
 }
-MODE = os.getenv("OSTEOGUARD_MODE", "demo")  # "demo" keeps the UI responsive
+# "demo" was the former name of the balanced preset; still accepted.
+RETRIEVAL_PRESETS["demo"] = RETRIEVAL_PRESETS["balanced"]
+
+MODE = config.RETRIEVAL_MODE if config.RETRIEVAL_MODE in RETRIEVAL_PRESETS else "accurate"
 
 # Only true boilerplate is dropped. The previous list also removed "METHODS",
 # "Context" and "Rationale and impact", which hold real recommendation text --
@@ -55,6 +62,10 @@ MODE = os.getenv("OSTEOGUARD_MODE", "demo")  # "demo" keeps the UI responsive
 JUNK_SECTIONS = [
     "contents", "references", "acknowledgment",
     "your responsibility", "update information",
+    # Front matter and change logs. These carry the words "guideline" and
+    # "management" without any clinical content, so a topic-level query used
+    # to rank them above the actual recommendations.
+    "minor changes since publication", "terms used in this guideline",
 ]
 
 # Clinical abbreviations, so the keyword leg can match their expanded forms.
@@ -71,6 +82,9 @@ QUERY_EXPANSIONS = {
     "rollator": "rollator walking frame walking aid assistive device",
     "acetaminophen": "acetaminophen paracetamol",
 }
+
+# Reports longer than this are trimmed before being sent to the model.
+REPORT_CHAR_LIMIT = 60000
 
 _collection = None
 _bm25 = None
@@ -192,19 +206,116 @@ def retrieve_evidence(query, top_n=5, mode=None):
     return sources
 
 
-def generate_response(query, api_key, top_n=5, mode=None):
+class NotConfigured(RuntimeError):
+    """No API key is available from the deployment's configuration."""
+
+
+_client = None
+
+
+def _get_client(api_key=None):
+    """The generation client for the configured provider.
+
+    `api_key` is only an override for callers that manage their own credentials
+    (scripts, notebooks). The application passes nothing: the key comes from the
+    environment via config, never from the interface.
+    """
+    global _client
+
+    key = api_key or config.get_api_key()
+    if not key:
+        raise NotConfigured(config.MISSING_KEY_MESSAGE)
+
+    if api_key is None and _client is not None:
+        return _client
+
+    if config.LLM_PROVIDER == "gemini":
+        import google.generativeai as genai
+        genai.configure(api_key=key)
+        client = genai.GenerativeModel(config.GEMINI_MODEL)
+    else:
+        from groq import Groq
+        client = Groq(api_key=key)
+
+    if api_key is None:
+        _client = client
+    return client
+
+
+# openai/gpt-oss intermittently falls into a run of filler characters
+# (zero-width and narrow no-break spaces). It is not cosmetic: the run eats the
+# completion budget and the real answer is truncated mid-sentence. Measured at
+# roughly 1 in 6 replies on this corpus at temperature 0.2, so every reply is
+# checked and resampled; three attempts puts the residual failure rate well
+# under 1%.
+_FILLER_RUN = re.compile("[​‌‍  ﻿ ]{8,}")
+_DROP = {ord(c): None for c in "​‌‍﻿"}
+_TO_SPACE = {ord(c): " " for c in "   "}
+
+
+def looks_degenerate(text):
+    """True when a reply contains a filler run rather than an answer."""
+    return bool(_FILLER_RUN.search(text or ""))
+
+
+def _clean_output(text):
+    """Remove invisible filler and normalise exotic spaces to plain ones."""
+    text = (text or "").translate(_DROP).translate(_TO_SPACE)
+    return re.sub(r"[ 	]{3,}", " ", text)
+
+
+def _chat(prompt, api_key=None, job="assistant", attempts=3):
+    """Send one prompt to the model configured for `job` and return its text.
+
+    `job` is "assistant" (guideline answering) or "summary" (report
+    summarisation); each carries its own model, temperature and token budget so
+    that tuning one cannot regress the other.
+
+    Temperature is held low: this is clinical text handling, not creative
+    writing, and on gpt-oss a high temperature makes the filler-run failure far
+    more likely. Retrieval never goes through here -- embeddings and reranking
+    run locally.
+    """
+    client = _get_client(api_key)
+
+    if config.LLM_PROVIDER == "gemini":
+        return _clean_output(client.generate_content(prompt).text)
+
+    if job == "summary":
+        model = config.SUMMARY_MODEL
+        temperature = config.SUMMARY_TEMPERATURE
+        max_tokens = config.SUMMARY_MAX_TOKENS
+    else:
+        model = config.ASSISTANT_MODEL
+        temperature = config.ASSISTANT_TEMPERATURE
+        max_tokens = config.ASSISTANT_MAX_TOKENS
+
+    reply = ""
+    for attempt in range(attempts):
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            # A small nudge on retry, so a second identical sample is unlikely.
+            temperature=temperature + 0.1 * attempt,
+            max_completion_tokens=max_tokens,
+        )
+        # gpt-oss also exposes a `reasoning` field; the answer is `content`.
+        reply = completion.choices[0].message.content or ""
+        if not looks_degenerate(reply):
+            break
+
+    return _clean_output(reply)
+
+
+def _model_error(exc):
+    return (f"Could not reach the {config.LLM_PROVIDER} model: {exc}")
+
+
+def generate_response(query, api_key=None, top_n=5, mode=None):
     """Retrieve guideline evidence and answer grounded in it.
 
     Returns (answer_text, sources).
     """
-    genai.configure(api_key=api_key)
-    try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-    except Exception as exc:
-        return (f"Could not load Gemini model '{GEMINI_MODEL}': {exc}\n\n"
-                "Set the GEMINI_MODEL environment variable to a model id your "
-                "API key can access."), []
-
     # Translate to English so the clinical index (English) can be searched.
     translate_prompt = (
         "Translate the following text to English for a clinical database search. "
@@ -212,9 +323,11 @@ def generate_response(query, api_key, top_n=5, mode=None):
         f"Output ONLY the translated text.\nText: {query}"
     )
     try:
-        translated_query = model.generate_content(translate_prompt).text.strip()
+        translated_query = _chat(translate_prompt, api_key).strip()
+    except NotConfigured as exc:
+        return str(exc), []
     except Exception as exc:
-        return f"Error translating query: {exc}", []
+        return _model_error(exc), []
 
     sources = retrieve_evidence(translated_query, top_n=top_n, mode=mode)
     if not sources:
@@ -240,7 +353,136 @@ User Question: {query}
 """
 
     try:
-        response = model.generate_content(prompt)
-        return response.text, sources
+        return _chat(prompt, api_key), sources
     except Exception as exc:
-        return f"Error generating response: {exc}", sources
+        return _model_error(exc), sources
+
+
+# --- Report summarisation ---------------------------------------------------
+
+SUMMARY_PROMPT = """You are a clinical documentation assistant. Summarise the
+medical report below for a busy clinician.
+
+Rules you must follow:
+- Use ONLY information that is present in the report. Never infer, estimate,
+  extrapolate or invent anything.
+- If the report does not contain something a heading asks for, write exactly:
+  *Not stated in the report.*
+- Reproduce all numbers, doses, dates and units exactly as written.
+- Do not add a diagnosis, grade or measurement the report does not state.
+- Do not give treatment advice here; only report what the document says.
+- Write in the same language the report is written in.
+
+Return markdown using exactly these headings:
+
+### Patient snapshot
+### Reason for the report
+### Key findings
+### Diagnoses stated in the report
+### Current management
+### Abnormal or urgent findings
+### Follow-up and next steps
+
+Keep each section to short bullet points.
+
+--- REPORT START ---
+{report}
+--- REPORT END ---
+"""
+
+TOPIC_PROMPT = """Read the clinical report below and list the clinical terms
+that should be looked up in a treatment guideline.
+
+Give the affected joint, the diagnosis, and the treatments that are mentioned
+or that the findings raise. Clinical terms only, separated by spaces, 15 words
+maximum.
+
+Do NOT use the words "guideline", "recommendation", "management", "patient" or
+"report" -- those words match title pages rather than clinical text. Output the
+terms only, nothing else.
+
+{report}
+"""
+
+TRUNCATION_NOTE = """
+
+---
+*Note: the report was longer than {limit:,} characters, so only the first
+{limit:,} characters were summarised.*"""
+
+
+def summarize_report(report_text, api_key=None, with_evidence=True, top_n=4, mode=None):
+    """Summarise a free-text medical report.
+
+    The summary is constrained to the content of the report itself. When
+    `with_evidence` is set, guideline passages relevant to the report's topic
+    are retrieved as well -- these are clearly separate from the summary and
+    must be labelled as guideline text in the UI.
+
+    Returns (summary_markdown, sources).
+    """
+    text = (report_text or "").strip()
+    if not text:
+        return "No report text was provided.", []
+
+    truncated = len(text) > REPORT_CHAR_LIMIT
+    text = text[:REPORT_CHAR_LIMIT]
+
+    try:
+        summary = _chat(SUMMARY_PROMPT.format(report=text), api_key, job="summary")
+    except NotConfigured as exc:
+        return str(exc), []
+    except Exception as exc:
+        return _model_error(exc), []
+
+    if truncated:
+        summary += TRUNCATION_NOTE.format(limit=REPORT_CHAR_LIMIT)
+
+    sources = []
+    if with_evidence:
+        # Evidence is a bonus -- a failure here must not lose the summary.
+        try:
+            topic = _chat(TOPIC_PROMPT.format(report=text[:4000]), api_key,
+                          job="summary").strip()
+            sources = retrieve_evidence(topic, top_n=top_n, mode=mode)
+        except Exception:
+            sources = []
+
+    return summary, sources
+
+
+def corpus_stats():
+    """Chunk and document counts read straight from the Chroma sqlite file.
+
+    Deliberately does not touch the embedding models, so the UI can show this
+    instantly. Returns None if the database cannot be read.
+    """
+    import sqlite3
+
+    path = os.path.join(DB_PATH, "chroma.sqlite3")
+    if not os.path.exists(path):
+        return None
+
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        documents = con.execute(
+            "SELECT string_value, COUNT(*) FROM embedding_metadata "
+            "WHERE key = 'document_name' GROUP BY string_value ORDER BY 2 DESC"
+        ).fetchall()
+        sections = con.execute(
+            "SELECT COUNT(DISTINCT string_value) FROM embedding_metadata "
+            "WHERE key = 'section_title'"
+        ).fetchone()[0]
+        pages = con.execute(
+            "SELECT MAX(int_value) FROM embedding_metadata WHERE key = 'page_number'"
+        ).fetchone()[0]
+        con.close()
+    except Exception:
+        return None
+
+    return {
+        "documents": [{"name": name, "chunks": count} for name, count in documents],
+        "chunks": sum(count for _, count in documents),
+        "sections": sections,
+        "max_page": pages,
+    }

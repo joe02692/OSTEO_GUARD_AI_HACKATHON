@@ -1,7 +1,11 @@
 streamlit==1.61.1
-google-generativeai>=0.8.0
+groq>=0.11.0
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
 rank_bm25>=0.2.2
 python-dotenv>=1.0.0
+pymupdf>=1.24.0
 numpy
+
+# Optional: only needed if LLM_PROVIDER=gemini. The SDK is end-of-life.
+# google-generativeai>=0.8.0

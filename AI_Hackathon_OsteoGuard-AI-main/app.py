@@ -1,10 +1,7 @@
 import streamlit as st
-import os
-from dotenv import load_dotenv
-from backend import generate_response
 
-# Load environment variables
-load_dotenv()
+import config
+from backend import generate_response
 
 st.set_page_config(
     page_title="OsteoGuard AI",
@@ -67,12 +64,8 @@ with st.sidebar:
     st.divider()
     
     st.markdown("### ⚙️ Settings")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        api_key = st.text_input("Enter your Gemini API Key", type="password")
-        if api_key:
-            os.environ["GEMINI_API_KEY"] = api_key
-            st.success("API Key set!")
+    # Credentials come from deployment configuration, not from this interface.
+    configured = config.api_key_configured()
             
     num_chunks = st.slider("Number of evidence chunks", min_value=1, max_value=10, value=5)
     st.divider()
@@ -80,8 +73,8 @@ with st.sidebar:
     st.markdown("### 🔒 Safety")
     st.caption("This system is intended to support clinicians. It does not replace professional medical judgment.")
     
-    if not api_key:
-        st.warning("Backend not connected.\nPlease enter API Key.")
+    if not configured:
+        st.warning(config.MISSING_KEY_MESSAGE)
 
 # --- MAIN CONTENT ---
 st.markdown("<h1>🦴 OsteoGuard AI</h1>", unsafe_allow_html=True)
@@ -123,13 +116,13 @@ submit_clicked = st.button("⚡ Retrieve Evidence & Generate Answer", type="prim
 if submit_clicked:
     if not user_query.strip():
         st.warning("Please enter a question first.")
-    elif not api_key:
-        st.error("Please configure your Gemini API Key in the sidebar.")
+    elif not configured:
+        st.error(config.MISSING_KEY_MESSAGE)
     else:
         st.markdown("### 📊 Response")
         with st.spinner("Retrieving evidence and generating answer..."):
             try:
-                response_text, sources = generate_response(user_query, api_key, top_n=num_chunks)
+                response_text, sources = generate_response(user_query, top_n=num_chunks)
                 
                 # Display Answer
                 st.markdown(response_text)
