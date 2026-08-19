@@ -210,6 +210,13 @@ DEFAULTS = {
 for key, value in DEFAULTS.items():
     st.session_state.setdefault(key, value)
 
+# Deep-linking: /?page=Report+Summary opens that page directly. Applied once
+# per browser session so in-app navigation is not overridden on rerun.
+_page_param = st.query_params.get("page")
+if _page_param in dict(HEADERS) and not st.session_state.get("_deeplinked"):
+    st.session_state.page = _page_param
+    st.session_state._deeplinked = True
+
 
 def use_example(text):
     """Callback: fill the question box. Runs before the rerun, which is the
