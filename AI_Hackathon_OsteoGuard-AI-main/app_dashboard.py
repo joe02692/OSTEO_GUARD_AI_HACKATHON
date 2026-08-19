@@ -10,14 +10,18 @@ Two working tools, both driven by the same guideline-grounded LLM backend:
 Run with:  python -m streamlit run app_dashboard.py
 """
 
+import json
 import os
 from contextlib import contextmanager
 
 import streamlit as st
 
 import config
+import records
 import reports
+import resources
 import risk
+import safety
 
 st.set_page_config(page_title="OsteoGuard AI", page_icon="\U0001FA7A", layout="wide",
                    initial_sidebar_state="expanded")
@@ -97,6 +101,28 @@ def render_evidence(sources, caption=None):
             st.markdown(f"[Open the source guideline]({source['url']})")
 
 
+def render_exercise_videos(*texts):
+    """Show exercise demonstrations when the text is about exercise.
+
+    Both guidelines put therapeutic exercise first, so an answer that
+    recommends it is more useful with something to show the patient.
+    """
+    videos = resources.exercise_videos(*texts)
+    if not videos:
+        return
+    with card("Exercise demonstrations", "🎬"):
+        video_links(videos)
+
+
+def video_links(videos):
+    st.markdown("".join(
+        f"<a class='vid' href='{video['url']}' target='_blank' "
+        f"rel='noopener noreferrer'><span class='play'>&#9654;</span>"
+        f"<span>{video['label']}</span></a>" for video in videos),
+        unsafe_allow_html=True)
+    st.caption(resources.DISCLAIMER)
+
+
 BAR_COLOR = {"High": "#ef4444", "Moderate": "#f59e0b", "Low": "#10b981"}
 RISK_PILL = {"High": "pill-red", "Moderate": "pill-amber", "Low": "pill-green"}
 
@@ -145,6 +171,10 @@ DEFAULTS = {
     "question": "",
     "report_input": "",
     "report_note": "",
+    "report_ocr": False,
+    "red_flags": [],
+    "screened": False,
+    "saved_id": None,
     "answer": "",
     "sources": [],
     "summary": "",
@@ -163,13 +193,19 @@ def use_example(text):
 
 
 def load_uploaded_report():
-    """Callback: pull text out of the uploaded file into the paste box."""
+    """Callback: pull text out of the uploaded file into the paste box.
+
+    Scans go through OCR inside extract_text, which can take a few seconds per
+    page; Streamlit shows the file uploader's own spinner meanwhile.
+    """
     upload = st.session_state.get("report_file")
     if upload is None:
         st.session_state.report_note = ""
+        st.session_state.report_ocr = False
         return
-    text, note = reports.extract_text(upload.name, upload.getvalue())
+    text, note, used_ocr = reports.extract_text(upload.name, upload.getvalue())
     st.session_state.report_note = note
+    st.session_state.report_ocr = used_ocr
     if text:
         st.session_state.report_input = text
 
@@ -177,8 +213,12 @@ def load_uploaded_report():
 def clear_report():
     st.session_state.report_input = ""
     st.session_state.report_note = ""
+    st.session_state.report_ocr = False
     st.session_state.summary = ""
     st.session_state.summary_sources = []
+    st.session_state.red_flags = []
+    st.session_state.screened = False
+    st.session_state.saved_id = None
 
 
 # --------------------------------------------------------------------------
@@ -291,6 +331,8 @@ if page == "Clinical Assistant":
             if st.session_state.sources:
                 with card("Retrieved evidence", "\U0001F4DA"):
                     render_evidence(st.session_state.sources)
+            render_exercise_videos(st.session_state.question,
+                                   st.session_state.answer)
 
     with right:
         with card("How an answer is built", "\U0001F9EA"):
@@ -341,6 +383,10 @@ if page == "Clinical Assistant":
 # 2. REPORT SUMMARY  (replaces the old X-ray module)
 # ==========================================================================
 elif page == "Report Summary":
+    # Filled in after screening runs below. Reserved here so an urgent finding
+    # appears at the top of the page rather than below the fold.
+    alert_slot = st.empty()
+
     top_left, top_right = st.columns([1, 1.45])
 
     with top_left:
@@ -351,8 +397,17 @@ elif page == "Report Summary":
                 help="PDF or plain text. Scanned PDFs need OCR, which is not connected.",
             )
             if st.session_state.report_note:
-                st.markdown(f"<div class='note-green'>{st.session_state.report_note}</div>",
+                tone = "note-amber" if st.session_state.report_ocr else "note-green"
+                st.markdown(f"<div class='{tone}'>{st.session_state.report_note}</div>",
                             unsafe_allow_html=True)
+            if st.session_state.report_ocr:
+                st.markdown(
+                    "<div class='note-amber'><b>Check the text below before "
+                    "summarising.</b> OCR misreads characters, and a wrong digit "
+                    "in a dose or a measurement carries clinical risk. Correct "
+                    "anything that looks wrong -- the summary uses this text, not "
+                    "the original image.</div>",
+                    unsafe_allow_html=True)
             st.caption("Or paste the report text directly:")
             st.text_area("Report text", key="report_input", height=210,
                          label_visibility="collapsed",
@@ -375,13 +430,34 @@ elif page == "Report Summary":
         else:
             with st.spinner("Reading the report and summarising..."):
                 try:
-                    from backend import summarize_report
+                    from backend import summarize_report, _chat as backend_chat
                     summary, summary_sources = summarize_report(
                         report_text, with_evidence=with_evidence)
                     st.session_state.summary = summary
                     st.session_state.summary_sources = summary_sources
+                    st.session_state.saved_id = None
+                    # Screen the report itself, not the summary, so nothing the
+                    # summariser dropped can hide an urgent finding.
+                    st.session_state.red_flags = safety.screen_report(
+                        report_text, chat=lambda p: backend_chat(p, job="summary"))
+                    st.session_state.screened = True
                 except Exception as exc:
                     st.error(f"Error: {exc}")
+
+    if st.session_state.red_flags:
+        rows = "".join(
+            f"<div class='flag'><div><div class='n'>{flag['concern']}</div>"
+            f"<div class='q'>&ldquo;{flag['quote']}&rdquo;</div></div>"
+            f"<div class='src'>{flag['source']}</div></div>"
+            for flag in st.session_state.red_flags)
+        alert_slot.markdown(
+            "<div class='alert-red'><div class='t'>&#9888;&#65039; "
+            + safety.BANNER_TITLE + "</div><div class='b'>"
+            + safety.BANNER_BODY + "</div>" + rows + "</div>",
+            unsafe_allow_html=True)
+    elif st.session_state.screened:
+        alert_slot.markdown(f"<div class='note-green'>{safety.NO_FLAG_NOTE}</div>",
+                            unsafe_allow_html=True)
 
     with top_right:
         with card("2. Structured summary", "\U0001F9FE"):
@@ -471,8 +547,26 @@ Verify against the current published guideline before acting.
             st.download_button("\U0001F4C4  Download summary (TXT)", report_lines,
                                file_name="osteoguard_summary.txt",
                                type="primary", use_container_width=True)
-            st.button("\U0001F4BE  Save to patient records", use_container_width=True,
-                      disabled=True, help="No data store is connected yet.")
+            st.write("")
+            patient_ref = st.text_input(
+                "Patient reference", key="patient_ref",
+                placeholder="e.g. MRN 44821 or initials",
+                help="Your own identifier for this record. Saved locally.")
+            if st.button("Save to patient records", use_container_width=True):
+                if not st.session_state.summary:
+                    st.warning("Generate a summary before saving.")
+                else:
+                    record_id = records.save_assessment(
+                        patient_ref=patient_ref or "Unnamed",
+                        age=age, gender=gender, bmi=bmi, joint=knee,
+                        duration=duration,
+                        risk_level=risk.overall_risk(factors)[0],
+                        summary=st.session_state.summary,
+                        red_flags=st.session_state.red_flags,
+                        sources=st.session_state.summary_sources,
+                        notes=st.session_state.get("clinician_notes", ""))
+                    st.session_state.saved_id = record_id
+                    st.success(f"Saved as record #{record_id}.")
             st.write("")
             st.markdown(
                 "<div class='note-blue'>The export contains the summary and the "
@@ -508,6 +602,11 @@ Verify against the current published guideline before acting.
             if st.session_state.recommendations:
                 st.markdown(st.session_state.recommendations)
                 render_evidence(st.session_state.recommendation_sources)
+                videos = resources.exercise_videos(
+                    st.session_state.recommendations, knee)
+                if videos:
+                    st.markdown("**Exercise demonstrations**")
+                    video_links(videos)
             else:
                 items = [
                     "Exercise and weight management are first-line for knee OA.",
@@ -529,12 +628,14 @@ Verify against the current published guideline before acting.
 
     with bottom_right:
         with card("Clinician notes", "\U0001F4AC"):
-            st.text_area("Notes", placeholder="Add your own notes...",
+            st.text_area("Notes", key="clinician_notes",
+                         placeholder="Add your own notes...",
                          label_visibility="collapsed", height=150)
             st.markdown(
-                "<div class='note-green'>Notes stay in this session only - no "
-                "patient data is stored or transmitted anywhere except to the "
-                "generation API when you press a generate button.</div>",
+                "<div class='note-green'>Notes are kept for this session, and "
+                "are written to the local record file if you press <b>Save to "
+                "patient records</b>. Report text is sent to the generation API "
+                "only when you press a generate button.</div>",
                 unsafe_allow_html=True,
             )
 
@@ -543,20 +644,84 @@ Verify against the current published guideline before acting.
 # 3. PATIENT RECORDS
 # ==========================================================================
 elif page == "Patient Records":
-    with card("Not implemented", "\U0001F464"):
-        st.markdown(
-            "<div class='note-amber'><b>Patient records are not implemented.</b> "
-            "This page is part of the interface layout; no database is connected "
-            "behind it, so nothing is stored between sessions. Use "
-            "<b>Export</b> on the Report Summary page to keep a copy of an "
-            "assessment.</div>",
-            unsafe_allow_html=True,
-        )
+    saved = records.list_assessments()
+    db_path, db_bytes = records.store_location()
+
+    left, right = st.columns([1.7, 1])
+
+    with left:
+        with card(f"Saved assessments ({len(saved)})", "👤"):
+            if not saved:
+                empty_state("No assessments saved yet.<br>Summarise a report, "
+                            "then press <b>Save to patient records</b>.")
+            for entry in saved:
+                flags = json.loads(entry["red_flags"] or "[]")
+                when = entry["created_at"].replace("T", " ")
+                pill = (f"<span class='pill pill-red'>{len(flags)} red flag"
+                        f"{'' if len(flags) == 1 else 's'}</span>"
+                        if flags else
+                        f"<span class='pill {RISK_PILL.get(entry['risk_level'], 'pill-grey')}'>"
+                        f"{entry['risk_level'] or 'no risk score'}</span>")
+                st.markdown(
+                    f"<div class='rec'><div><div class='who'>#{entry['id']} &middot; "
+                    f"{entry['patient_ref']}</div><div class='when'>{when} &middot; "
+                    f"{entry['age'] or '?'}y {entry['gender'] or ''} &middot; "
+                    f"{entry['joint'] or 'joint not recorded'}</div></div>{pill}</div>",
+                    unsafe_allow_html=True)
+
+                with st.expander(f"Open record #{entry['id']}"):
+                    full = records.get_assessment(entry["id"])
+                    if full:
+                        if full["red_flags"]:
+                            st.markdown(
+                                "<div class='alert-red'><div class='t'>"
+                                "&#9888;&#65039; Red flags recorded</div>"
+                                + "".join(
+                                    f"<div class='flag'><div><div class='n'>"
+                                    f"{flag['concern']}</div><div class='q'>"
+                                    f"&ldquo;{flag['quote']}&rdquo;</div></div></div>"
+                                    for flag in full["red_flags"]) + "</div>",
+                                unsafe_allow_html=True)
+                        st.markdown(full["summary"] or "_No summary stored._")
+                        if full["notes"]:
+                            st.markdown("**Clinician notes**")
+                            st.write(full["notes"])
+                        if full["sources"]:
+                            st.markdown("**Guideline citations**")
+                            for source in full["sources"]:
+                                st.markdown(
+                                    f"- {source.get('doc_name')} p.{source.get('page')} "
+                                    f"({source.get('section') or 'no section'})")
+                        st.download_button(
+                            "Download this record", full["summary"] or "",
+                            file_name=f"osteoguard_record_{full['id']}.txt",
+                            key=f"dl_{full['id']}")
+                        if st.button("Delete this record", key=f"del_{full['id']}"):
+                            records.delete_assessment(full["id"])
+                            st.rerun()
+
+    with right:
+        with card("Where records are kept", "🗄"):
+            st.markdown(
+                "<div class='note-blue'>Records are stored in a single SQLite "
+                "file on this machine. Nothing is uploaded, and no cloud "
+                "service is involved.</div>",
+                unsafe_allow_html=True)
+            st.write("")
+            row("Records", str(len(saved)))
+            row("File size", f"{db_bytes / 1024:.0f} KB" if db_bytes else "empty")
+            st.caption(db_path)
+
+        with card("Handle with care", "🔒"):
+            st.markdown(
+                "<div class='note-amber'>This file holds clinical text and "
+                "whatever reference you typed, so treat it as patient data: it "
+                "is not encrypted, it is not backed up, and anyone with access "
+                "to this machine can read it. It is git-ignored so it cannot be "
+                "committed by accident.</div>",
+                unsafe_allow_html=True)
 
 
-# ==========================================================================
-# 4. STATISTICS
-# ==========================================================================
 elif page == "Statistics":
     try:
         from backend import corpus_stats
@@ -644,7 +809,10 @@ parallel, are fused with reciprocal rank fusion, reranked by the MedCPT
 biomedical cross-encoder, and answered strictly over the retrieved text. Confidence is Platt-calibrated so the reported figure tracks measured
 precision rather than a raw model score.
 
-**Report summarisation.** A dedicated summarisation model - configured and
+**Report summarisation.** Digital PDFs are read from their text layer; scans
+and phone photographs are detected by text density and read with local OCR, so
+nothing but the recovered text ever leaves the machine. A dedicated
+summarisation model - configured and
 tuned separately from the assistant - condenses an uploaded or pasted clinical
 report into a fixed set of headings: findings, diagnoses, current management,
 follow-up. The prompt forbids inference, so anything the report does not state
@@ -658,11 +826,14 @@ same hybrid search that serves the assistant, and labelled as guideline text.
                 "<div class='note-amber'>"
                 "<b>No imaging analysis.</b> This system does not read X-rays or "
                 "any other image, and does not produce Kellgren-Lawrence grades.<br><br>"
-                "<b>No OCR.</b> Scanned PDFs without a text layer cannot be read.<br><br>"
+                "<b>OCR is approximate.</b> Scanned reports are read locally with OCR, which misreads characters. Check the extracted text before summarising "
+                "-- a wrong digit in a dose is a clinical risk.<br><br>"
                 "<b>Two guidelines only.</b> Answers reflect NICE NG226 and ACR/AF "
                 "2019 and nothing else - including nothing published since.<br><br>"
-                "<b>No patient data storage.</b> Nothing is persisted between "
-                "sessions."
+                "<b>Records are stored unencrypted, locally.</b> Saving an "
+                "assessment writes it to a SQLite file on this machine. It is "
+                "not encrypted and not backed up, and anyone with access to the "
+                "machine can read it. Nothing is uploaded."
                 "</div>",
                 unsafe_allow_html=True,
             )

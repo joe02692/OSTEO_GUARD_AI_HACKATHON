@@ -51,10 +51,25 @@ calibrated confidence.
 
 **Report Summary** — upload a PDF or text clinical report (or paste it) and get
 a structured summary under fixed headings: findings, diagnoses, current
-management, flagged items, follow-up. The prompt forbids inference, so anything
+management, flagged items, follow-up. Digital PDFs are read from their text
+layer; scans and phone photographs are detected by text density and passed
+through local OCR, so the document itself never leaves the machine. The prompt forbids inference, so anything
 the report does not state comes back as *not stated in the report* rather than
 being filled in. Guideline evidence matching the report's topic is retrieved
 separately and labelled as guideline text.
+
+Every summarised report is also screened for red flags — infection, fracture,
+suspected malignancy, avascular necrosis, cord compression, DVT, complete
+tendon rupture, systemic features. A finding proposed by the model must carry a
+verbatim quote that is then checked against the report text, so the screen
+cannot raise an alarm the document does not support.
+
+When an answer is about exercise, YouTube search links for the relevant joint
+are offered alongside it. They are searches rather than specific videos: the
+app cannot vet an individual video's content.
+
+**Patient Records** — assessments saved to a local SQLite file. No cloud, no
+account, no upload. Browse, open, export or delete them from the page.
 
 **Statistics** — retrieval performance and live corpus composition read from the
 vector store.
@@ -98,6 +113,9 @@ Retrieval presets trade latency against precision:
 | `backend.py` | Retrieval, answering, report summarisation |
 | `reports.py` | PDF and text extraction from uploaded reports |
 | `risk.py` | Rule-based OA risk factor display |
+| `safety.py` | Red-flag screening with quote verification |
+| `records.py` | Local SQLite patient record store |
+| `resources.py` | Exercise video search links |
 | `app.py` | Earlier single-page Q&A UI, kept for reference |
 | `osteoguard_ai/Code/Rag_model.ipynb` | Corpus build and evaluation notebook |
 
@@ -105,9 +123,17 @@ Retrieval presets trade latency against precision:
 
 - **No imaging analysis.** The system does not read X-rays and does not produce
   Kellgren–Lawrence grades. The earlier simulated X-ray module was removed.
-- **No OCR.** Scanned PDFs without a text layer cannot be read.
+- **OCR output is approximate.** Scans and phone photographs are read with
+  local OCR, which misreads characters. The extracted text is shown for review
+  before summarising, and it should be checked — a wrong digit in a dose or a
+  measurement carries clinical risk. OCR is capped at the first 20 pages.
 - **Two guidelines only**, including nothing published since them.
-- **No storage.** Nothing is persisted between sessions.
+- **Red-flag screening is not triage.** It reports terms found in the report
+  text against a fixed list. It cannot see what a report does not say, and the
+  absence of a flag is never clearance.
+- **Saved records are unencrypted.** `osteoguard_records.db` is a plain SQLite
+  file on the machine, git-ignored and not backed up. Anyone with access to the
+  machine can read it.
 
 A decision-support aid for clinicians. It does not diagnose, does not prescribe,
 and does not replace professional medical judgement.

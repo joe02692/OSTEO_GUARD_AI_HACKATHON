@@ -11,3 +11,5 @@ venv/
 
 # Streamlit
 .streamlit/secrets.toml
+*.db
+osteoguard_records.db
