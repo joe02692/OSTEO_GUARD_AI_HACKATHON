@@ -7,9 +7,9 @@ and the ACR/AF 2019 osteoarthritis guideline.
 
 ## 👥 Team: The Innovators
 
-* **Youssef** — AI / Software Engineering
-* **[Teammate 2 Name]** — [Role/Specialty]
-* **[Teammate 3 Name]** — [Role/Specialty]
+* **Youssef Elbasiounsy** — AI / Software Engineering
+* **Ibrahim Ahmed** — Team Leader
+* **Ali sherif** — QA Testing
 
 ## Setup
 
