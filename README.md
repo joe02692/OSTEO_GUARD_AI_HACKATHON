@@ -66,6 +66,12 @@ the report does not state comes back as *not stated in the report* rather than
 being filled in. Guideline evidence matching the report's topic is retrieved
 separately and labelled as guideline text.
 
+Before anything is generated, the document is classified against the scope of
+the evidence base. Only osteoarthritis and joint / musculoskeletal reports are
+summarised; a clinical document about another specialty, or a non-medical file,
+is refused with an explanation and no summary is produced. A document that
+plainly names osteoarthritis is admitted without an extra model call.
+
 Every summarised report is also screened for red flags — infection, fracture,
 suspected malignancy, avascular necrosis, cord compression, DVT, complete
 tendon rupture, systemic features. A finding proposed by the model must carry a
@@ -119,6 +125,7 @@ theme.css                 clinical green / blue / white theme
 config.py                 credentials and engine settings, from the environment
 backend.py                retrieval, answering, report summarisation
 reports.py                PDF / text extraction, with OCR for scans
+scope.py                  scope gate - refuses out-of-scope documents
 safety.py                 red-flag screening with quote verification
 records.py                local SQLite patient record store
 resources.py              exercise video search links
@@ -144,6 +151,8 @@ to one needs mirroring in the other.
   before summarising, and it should be checked — a wrong digit in a dose or a
   measurement carries clinical risk. OCR is capped at the first 20 pages.
 - **Two guidelines only**, including nothing published since them.
+- **The scope gate is a topic check, not a clinical judgement.** It decides
+  whether a document is about osteoarthritis, nothing more.
 - **Red-flag screening is not triage.** It reports terms found in the report
   text against a fixed list. It cannot see what a report does not say, and the
   absence of a flag is never clearance.

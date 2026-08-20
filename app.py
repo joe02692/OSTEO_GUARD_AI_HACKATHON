@@ -9,6 +9,7 @@ Two working tools, both driven by the same guideline-grounded LLM backend:
 
 Run with:  python -m streamlit run app.py
 """
+#python -m streamlit run "C:\Users\joeel\OneDrive\Desktop\OSTEO_GUARD_AI_HACKATHON\app.py"
 
 import json
 import os
@@ -22,6 +23,7 @@ import reports
 import resources
 import risk
 import safety
+import scope
 
 st.set_page_config(page_title="OsteoGuard AI", page_icon="\U0001FA7A", layout="wide",
                    initial_sidebar_state="expanded")
@@ -100,7 +102,14 @@ def bar(percent, start="#38bdf8", end="#10b981"):
 
 
 def empty_state(message):
-    st.markdown(f"<div class='empty'>{message}</div>", unsafe_allow_html=True)
+    """Centred placeholder panel.
+
+    The message is wrapped in a single span: `.empty` is a flex container, so
+    without one wrapper each element and text node becomes its own flex item
+    and the sentence lays out sideways instead of flowing.
+    """
+    st.markdown(f"<div class='empty'><span>{message}</span></div>",
+                unsafe_allow_html=True)
 
 
 def render_evidence(sources, caption=None):
@@ -198,6 +207,7 @@ DEFAULTS = {
     "report_input": "",
     "report_note": "",
     "report_ocr": False,
+    "out_of_scope": None,
     "red_flags": [],
     "screened": False,
     "saved_id": None,
@@ -252,6 +262,7 @@ def clear_report():
     st.session_state.red_flags = []
     st.session_state.screened = False
     st.session_state.saved_id = None
+    st.session_state.out_of_scope = None
 
 
 # --------------------------------------------------------------------------
@@ -478,21 +489,49 @@ elif page == "Report Summary":
             with st.spinner("Reading the report and summarising..."):
                 try:
                     from backend import summarize_report, _chat as backend_chat
-                    summary, summary_sources = summarize_report(
-                        report_text, with_evidence=with_evidence,
-                        language=summary_language)
-                    st.session_state.summary = summary
-                    st.session_state.summary_sources = summary_sources
-                    st.session_state.saved_id = None
-                    # Screen the report itself, not the summary, so nothing the
-                    # summariser dropped can hide an urgent finding.
-                    st.session_state.red_flags = safety.screen_report(
-                        report_text, chat=lambda p: backend_chat(p, job="summary"))
-                    st.session_state.screened = True
+                    summarise_chat = lambda p: backend_chat(p, job="summary")
+
+                    # Scope gate. A document outside the guideline corpus is
+                    # refused before anything is generated, so the app never
+                    # produces a fluent summary it has no evidence for.
+                    verdict = scope.classify_document(report_text,
+                                                      chat=summarise_chat)
+                    st.session_state.out_of_scope = (
+                        None if verdict["category"] == scope.IN_SCOPE else verdict)
+
+                    if st.session_state.out_of_scope:
+                        st.session_state.summary = ""
+                        st.session_state.summary_sources = []
+                        st.session_state.red_flags = []
+                        st.session_state.screened = False
+                        st.session_state.saved_id = None
+                    else:
+                        summary, summary_sources = summarize_report(
+                            report_text, with_evidence=with_evidence,
+                            language=summary_language)
+                        st.session_state.summary = summary
+                        st.session_state.summary_sources = summary_sources
+                        st.session_state.saved_id = None
+                        # Screen the report itself, not the summary, so nothing
+                        # the summariser dropped can hide an urgent finding.
+                        st.session_state.red_flags = safety.screen_report(
+                            report_text, chat=summarise_chat)
+                        st.session_state.screened = True
                 except Exception as exc:
                     st.error(f"Error: {exc}")
 
-    if st.session_state.red_flags:
+    if st.session_state.out_of_scope:
+        verdict = st.session_state.out_of_scope
+        refusal = scope.REFUSAL[verdict["category"]]
+        detected = (f"<div class='flag'><div><div class='n'>Detected subject</div>"
+                    f"<div class='q'>{verdict['subject']}</div></div>"
+                    f"<div class='src'>{verdict['source']}</div></div>")
+        alert_slot.markdown(
+            "<div class='alert-red'><div class='t'>&#9888;&#65039; "
+            + refusal["title"] + "</div><div class='b'>"
+            + refusal["body"] + "</div>" + detected + "</div>",
+            unsafe_allow_html=True)
+    elif st.session_state.red_flags:
         rows = "".join(
             f"<div class='flag'><div><div class='n'>{flag['concern']}</div>"
             f"<div class='q'>&ldquo;{flag['quote']}&rdquo;</div></div>"
@@ -517,6 +556,10 @@ elif page == "Report Summary":
                     "rather than filled in.</div>",
                     unsafe_allow_html=True,
                 )
+            elif st.session_state.out_of_scope:
+                empty_state("<b>No summary generated.</b><br>This document is "
+                            "outside OsteoGuard’s osteoarthritis evidence "
+                            "base — see the notice above.")
             else:
                 empty_state("Load a report and press <b>Summarise report</b>.<br>"
                             "The summary appears here, split into findings, "
