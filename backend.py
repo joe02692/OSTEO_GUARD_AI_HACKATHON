@@ -251,6 +251,19 @@ _DROP = {ord(c): None for c in "​‌‍﻿"}
 _TO_SPACE = {ord(c): " " for c in "   "}
 
 
+def detect_language(text):
+    """The language an answer should be written in, decided in Python.
+
+    Asking the model to infer "the same language as the question" made it
+    occasionally drift into a third language entirely. The script is something
+    we can determine exactly, so we do it here and give the model an explicit
+    instruction instead of an inference task.
+    """
+    arabic = sum(1 for ch in (text or "") if "؀" <= ch <= "ۿ")
+    latin = sum(1 for ch in (text or "") if ch.isascii() and ch.isalpha())
+    return "Arabic" if arabic > latin else "English"
+
+
 def looks_degenerate(text):
     """True when a reply contains a filler run rather than an answer."""
     return bool(_FILLER_RUN.search(text or ""))
@@ -302,8 +315,11 @@ def _chat(prompt, api_key=None, job="assistant", attempts=3):
         completion = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
-            # A small nudge on retry, so a second identical sample is unlikely.
-            temperature=temperature + 0.1 * attempt,
+            # Retries change the seed, not the temperature. Raising the
+            # temperature also drew the model off-language, so the ladder now
+            # varies only the sample.
+            temperature=temperature,
+            seed=attempt,
             max_completion_tokens=max_tokens,
         )
         # gpt-oss also exposes a `reasoning` field; the answer is `content`.
@@ -315,43 +331,64 @@ def _chat(prompt, api_key=None, job="assistant", attempts=3):
 
 
 def _model_error(exc):
-    return (f"Could not reach the {config.LLM_PROVIDER} model: {exc}")
+    """A readable message for the interface, not a raw provider traceback."""
+    text = str(exc)
+    if "rate_limit" in text or "429" in text:
+        wait = re.search(r"try again in ([\dhms.]+)", text)
+        when = f" Capacity returns in about {wait.group(1).rstrip('.')}." if wait else ""
+        return ("The language service has reached its usage limit for now, so "
+                f"no new answer can be generated.{when} Retrieval and saved "
+                "records are unaffected.")
+    if "api key" in text.lower() or "401" in text:
+        return ("The language service rejected the configured API key. Check "
+                f"{config.key_variable()} in the .env file.")
+    return f"Could not reach the {config.LLM_PROVIDER} language service: {exc}"
 
 
 def generate_response(query, api_key=None, top_n=5, mode=None):
     """Retrieve guideline evidence and answer grounded in it.
 
-    Returns (answer_text, sources).
+    Returns (answer_text, sources, query_in_english). The third value is the
+    translated query used for retrieval; the interface uses it so that
+    language-specific features work for a question asked in any language.
     """
-    # Translate to English so the clinical index (English) can be searched.
-    translate_prompt = (
-        "Translate the following text to English for a clinical database search. "
-        "If it is already in English, return it exactly as is. "
-        f"Output ONLY the translated text.\nText: {query}"
-    )
-    try:
-        translated_query = _chat(translate_prompt, api_key).strip()
-    except NotConfigured as exc:
-        return str(exc), []
-    except Exception as exc:
-        return _model_error(exc), []
+    # The index is English, so a non-English question is translated first.
+    # A question already in English skips that call entirely -- it saves a
+    # round trip of latency and, on a metered plan, roughly half the tokens a
+    # simple question costs.
+    if detect_language(query) == "English":
+        translated_query = query
+    else:
+        translate_prompt = (
+            "Translate the following text to English for a clinical database "
+            "search. If it is already in English, return it exactly as is. "
+            "Output ONLY the translated text." + chr(10) + f"Text: {query}"
+        )
+        try:
+            translated_query = _chat(translate_prompt, api_key).strip()
+        except NotConfigured as exc:
+            return str(exc), [], query
+        except Exception as exc:
+            return _model_error(exc), [], query
 
     sources = retrieve_evidence(translated_query, top_n=top_n, mode=mode)
     if not sources:
         return ("I could not find any relevant information in the guidelines "
-                "to answer your query."), []
+                "to answer your query."), [], translated_query
 
     context_text = "".join(
         f"--- Source: {s['doc_name']} (Page {s['page']}) ---\n{s['text']}\n\n"
         for s in sources
     )
 
+    language = detect_language(query)
+
     prompt = f"""
 You are an expert clinical AI assistant for osteoarthritis management. Use the provided clinical guidelines to answer the user's question.
 If the answer is not contained in the provided guidelines, clearly state that you do not have that information based on the guidelines.
 Please be concise, objective, and cite the document names where appropriate.
 
-IMPORTANT: Please answer in the EXACT SAME LANGUAGE that the user used to ask their question below (e.g. if Arabic, answer in Arabic).
+LANGUAGE: Write your entire answer in {language}. Every heading, sentence and bullet must be in {language}. Do not use any other language.
 
 Context from Guidelines:
 {context_text}
@@ -360,9 +397,9 @@ User Question: {query}
 """
 
     try:
-        return _chat(prompt, api_key), sources
+        return _chat(prompt, api_key), sources, translated_query
     except Exception as exc:
-        return _model_error(exc), sources
+        return _model_error(exc), sources, translated_query
 
 
 # --- Report summarisation ---------------------------------------------------

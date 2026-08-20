@@ -194,6 +194,7 @@ HEADERS = {
 DEFAULTS = {
     "page": "Clinical Assistant",
     "question": "",
+    "question_en": "",
     "report_input": "",
     "report_note": "",
     "report_ocr": False,
@@ -350,10 +351,11 @@ if page == "Clinical Assistant":
                 with st.spinner("Searching the guidelines and composing an answer..."):
                     try:
                         from backend import generate_response
-                        answer, sources = generate_response(
+                        answer, sources, question_en = generate_response(
                             question, top_n=5)
                         st.session_state.answer = answer
                         st.session_state.sources = sources
+                        st.session_state.question_en = question_en
                     except Exception as exc:
                         st.error(f"Error: {exc}")
 
@@ -363,7 +365,10 @@ if page == "Clinical Assistant":
             if st.session_state.sources:
                 with card("Retrieved evidence", "\U0001F4DA"):
                     render_evidence(st.session_state.sources)
-            render_exercise_videos(st.session_state.question,
+            # Detection runs on the English translation as well as the
+            # original, so an Arabic question still matches.
+            render_exercise_videos(st.session_state.question_en,
+                                   st.session_state.question,
                                    st.session_state.answer)
 
     with right:
@@ -635,7 +640,7 @@ Verify against the current published guideline before acting.
                     with st.spinner("Retrieving guideline evidence..."):
                         try:
                             from backend import generate_response
-                            answer, sources = generate_response(
+                            answer, sources, _ = generate_response(
                                 question, top_n=5)
                             st.session_state.recommendations = answer
                             st.session_state.recommendation_sources = sources
@@ -886,6 +891,9 @@ same hybrid search that serves the assistant, and labelled as guideline text.
             st.markdown("""
 - [NICE NG226 - Osteoarthritis in over 16s](https://www.nice.org.uk/guidance/ng226)
 - [ACR/AF 2019 Osteoarthritis Guideline](https://rheumatology.org/osteoarthritis-guideline)
+- [World Health Organization - Osteoarthritis in over 16s](https://www.who.int/publications/i/item/9789241550044)
+- [National Institute for Health and Care Excellence - Osteoarthritis in over 16s](https://www.nice.org.uk/guidance/ng226)
+- [Egyptian Ministry of Health and Population](https://www.mohp.gov.eg/Content/Guidelines/osteoarthritis.pdf)   
 """)
 
         with card("Stack", "\U0001F9F0"):

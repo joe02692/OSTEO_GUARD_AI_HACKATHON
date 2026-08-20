@@ -52,18 +52,30 @@ EXERCISE_TOPICS = {
     ],
 }
 
+# Arabic terms are listed alongside the English ones so that a question asked
+# in Arabic still matches. They are matched as substrings, which handles the
+# definite article for free ("الركبة" contains "ركبة"). Only stems specific
+# enough to avoid false matches are included -- bare "يد" (hand), for example,
+# appears inside many unrelated Arabic words and is deliberately left out.
 JOINT_TERMS = {
-    "knee": ["knee", "tibiofemoral", "patellofemoral", "quadriceps"],
-    "hip": ["hip", "acetabul", "trochanter", "gluteal"],
-    "hand": ["hand", "finger", "thumb", "carpometacarpal", "cmc", "wrist"],
+    "knee": ["knee", "tibiofemoral", "patellofemoral", "quadriceps",
+             "ركبة", "ركبه", "الرضفة"],
+    "hip": ["hip", "acetabul", "trochanter", "gluteal",
+            "الورك", "ورك", "الحوض"],
+    "hand": ["hand", "finger", "thumb", "carpometacarpal", "cmc", "wrist",
+             "اليد", "أصابع", "إبهام", "الإبهام", "رسغ"],
     "shoulder": ["shoulder", "rotator cuff", "supraspinat", "acromio",
-                 "glenohumeral", "biceps tendon"],
+                 "glenohumeral", "biceps tendon",
+                 "كتف", "الكتف", "الكفة المدورة"],
 }
 
 EXERCISE_TERMS = [
     "exercise", "exercises", "physiotherapy", "physical therapy", "strengthening",
     "stretching", "aerobic", "activity", "rehabilitation", "rehab", "movement",
     "walking", "swimming", "cycling", "tai chi", "yoga", "muscle",
+    # Arabic
+    "تمارين", "تمرين", "رياض", "علاج طبيعي", "العلاج الطبيعي",
+    "تأهيل", "إطالة", "تقوية", "مشي", "سباحة", "حركة", "نشاط", "يوجا", "عضل",
 ]
 
 
