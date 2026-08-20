@@ -102,14 +102,7 @@ def bar(percent, start="#38bdf8", end="#10b981"):
 
 
 def empty_state(message):
-    """Centred placeholder panel.
-
-    The message is wrapped in a single span: `.empty` is a flex container, so
-    without one wrapper each element and text node becomes its own flex item
-    and the sentence lays out sideways instead of flowing.
-    """
-    st.markdown(f"<div class='empty'><span>{message}</span></div>",
-                unsafe_allow_html=True)
+    st.markdown(f"<div class='empty'>{message}</div>", unsafe_allow_html=True)
 
 
 def render_evidence(sources, caption=None):
